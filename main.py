@@ -1,10 +1,8 @@
 import os
 import json
-import tkinter as tk
 import torch
+from model_utils import load_model, generate_chunk, structure_prompt_v2
 
-from tkinter import ttk, filedialog, messagebox
-from model_utils import load_model, structure_prompt, generate_chunk
 MODEL_CHOICES = [
     ("GPT-2 Small (124M)", "gpt2"),
     ("DistilGPT-2 (82M)", "distilgpt2"),
@@ -13,131 +11,79 @@ MODEL_CHOICES = [
     ("Qwen3-4B", "Qwen/Qwen3-4B")
 ]
 
-def assemble_dataset(chunks: list, output_path: str):
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(chunks, f, ensure_ascii=False, indent=2)
-
-class App:
-    def __init__(self, root):
-        self.root = root
-        root.title("Генератор датасетов на нейросетях")
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.create_widgets()
-
-    def create_widgets(self):
-        # Модель для структурирования промпта
-        ttk.Label(self.root, text="Model for structuring prompt:")\
-            .grid(row=0, column=0, sticky=tk.W)
-        struct_names = [name for name, _ in MODEL_CHOICES]
-        self.struct_model = ttk.Combobox(
-            self.root, values=struct_names, state="readonly"
-        )
-        self.struct_model.current(0)
-        self.struct_model.grid(row=0, column=1, sticky=tk.EW)
-
-        # Модель для генерации данных
-        ttk.Label(self.root, text="Model for data generation:")\
-            .grid(row=1, column=0, sticky=tk.W)
-        self.gen_model = ttk.Combobox(
-            self.root, values=struct_names, state="readonly"
-        )
-        self.gen_model.current(1)
-        self.gen_model.grid(row=1, column=1, sticky=tk.EW)
-
-        # Токен Hugging Face 
-        ttk.Label(self.root, text="Hugging Face Token:")\
-            .grid(row=2, column=0, sticky=tk.W)
-        self.token_entry = ttk.Entry(self.root, show="*")
-        self.token_entry.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=5)
-
-        # Описание датасета
-        ttk.Label(self.root, text="Dataset description:")\
-            .grid(row=3, column=0, sticky=tk.NW)
-        self.desc_text = tk.Text(self.root, height=5, width=40)
-        self.desc_text.grid(row=3, column=1, padx=5, pady=5)
-
-        # Количество чанков
-        ttk.Label(self.root, text="Number of chunks:")\
-            .grid(row=4, column=0, sticky=tk.W)
-        self.chunk_entry = ttk.Entry(self.root)
-        self.chunk_entry.insert(0, "10")
-        self.chunk_entry.grid(row=4, column=1, sticky=tk.EW)
-
-        # Папка для сохранения
-        ttk.Button(self.root, text="Select output folder", command=self.select_folder)\
-            .grid(row=5, column=0)
-        self.output_var = tk.StringVar(value=os.getcwd())
-        ttk.Label(self.root, textvariable=self.output_var)\
-            .grid(row=5, column=1, sticky=tk.W)
-
-        # Информация о девайсе
-        self.device_label = ttk.Label(self.root, text=f"Device: {self.device.upper()}")
-        self.device_label.grid(row=6, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
-
-        # Кнопка запуска
-        ttk.Button(self.root, text="Generate Dataset", command=self.run)\
-            .grid(row=7, column=0, columnspan=2, pady=10)
-
-        # Лог
-        self.log_text = tk.Text(self.root, height=10, width=60)
-        self.log_text.grid(row=8, column=0, columnspan=2, padx=5, pady=5)
-
-        for i in range(2):
-            self.root.grid_columnconfigure(i, weight=1)
-
-    def select_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.output_var.set(folder)
-
-    def log(self, msg: str):
-        self.log_text.insert(tk.END, msg + "\n")
-        self.log_text.see(tk.END)
-        self.root.update()
-
-    def run(self):
-        token = self.token_entry.get().strip()
-        if token:
-            os.environ['HUGGINGFACE_TOKEN'] = token
-
-        desc = self.desc_text.get(1.0, tk.END).strip()
-        if not desc:
-            messagebox.showerror("Error", "Please enter dataset description.")
-            return
-        try:
-            n_chunks = int(self.chunk_entry.get())
-        except ValueError:
-            messagebox.showerror("Error", "Invalid number of chunks.")
-            return
-
-        struct_id = dict(MODEL_CHOICES)[self.struct_model.get()]
-        gen_id    = dict(MODEL_CHOICES)[self.gen_model.get()]
-
-        self.log(f"Using device: {self.device.upper()}")
-        self.log(f"Loading structure model: {struct_id}")
-        tok_struct, model_struct = load_model(struct_id, device=self.device, token=token)
-        self.log(f"Loading generation model: {gen_id}")
-        tok_gen, model_gen       = load_model(gen_id, device=self.device, token=token)
-
-        self.log("Structuring prompt...")
-        prompt = structure_prompt(tok_struct, model_struct, desc)
-        self.log(f"Structured prompt: {prompt}")
-
-        dataset = []
-        for i in range(n_chunks):
-            self.log(f"Generating chunk {i+1}/{n_chunks}...")
-            chunk = generate_chunk(tok_gen, model_gen, prompt)
-            dataset.append(chunk)
-
-        output_path = os.path.join(self.output_var.get(), "synthetic_dataset.json")
-        assemble_dataset(dataset, output_path)
-        self.log(f"Dataset saved to {output_path}")
-        messagebox.showinfo("Done", f"Dataset saved:\n{output_path}")
+def choose_model(prompt_text):
+    print(prompt_text)
+    for idx, (name, _) in enumerate(MODEL_CHOICES, 1):
+        print(f"  {idx}. {name}")
+    while True:
+        choice = input("Введите номер модели: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(MODEL_CHOICES):
+            return MODEL_CHOICES[int(choice)-1][1]
+        print("Некорректный выбор. Попробуйте снова.")
 
 def main():
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"\n=== Генератор датасетов (консоль) ===\nИспользуем устройство: {device.upper()}\n")
 
-if __name__ == "__main__":
+    # Выбор модели
+    model_id = choose_model("Выберите модель (одна и та же будет использована для структуры и генерации):")
+
+    # Токен
+    token = input("Введите ваш Hugging Face токен (или оставьте пустым): ").strip()
+    if token:
+        os.environ['HUGGINGFACE_TOKEN'] = token
+
+    # Описание датасета
+    print("\nВведите описание датасета. Для завершения введите пустую строку.")
+    lines = []
+    while True:
+        line = input()
+        if not line:
+            break
+        lines.append(line)
+    description = "\n".join(lines).strip()
+    if not description:
+        print("Ошибка: описание не может быть пустым.")
+        return
+
+    # Количество чанков
+    while True:
+        n_chunks = input("Количество чанков для генерации (по умолчанию 10): ").strip() or "10"
+        if n_chunks.isdigit() and int(n_chunks) > 0:
+            n_chunks = int(n_chunks)
+            break
+        print("Введите положительное целое число.")
+
+    # Путь сохранения
+    default_path = os.getcwd()
+    out = input(f"Путь для сохранения файла ({default_path}): ").strip() or default_path
+    if not os.path.isdir(out):
+        try:
+            os.makedirs(out)
+        except Exception as e:
+            print(f"Не удалось создать директорию: {e}")
+            return
+
+    print("\nЗагрузка модели...")
+    tokenizer, model = load_model(model_id, device=device, token=token)
+
+    print("Формируем шаблон структуры...")
+    prompt = structure_prompt_v2(tokenizer, model, description, device=device)
+    print(f"Сформированный шаблон:\n{prompt}\n")
+
+    # Генерация чанков
+    dataset = []
+    for i in range(1, n_chunks + 1):
+        print(f"Генерация чанка {i}/{n_chunks}...")
+        chunk = generate_chunk(tokenizer, model, prompt)
+        dataset.append(chunk)
+
+    # Сохранение
+    output_file = os.path.join(out, "synthetic_dataset.json")
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(dataset, f, ensure_ascii=False, indent=2)
+
+    print(f"\nГотово! Датасет сохранен: {output_file}\n")
+
+if __name__ == '__main__':
     main()

@@ -1,71 +1,90 @@
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import json
-def load_model(model_id, device="cpu", token=None):
+import torch
+
+def load_model(
+    model_id: str,
+    device: str = 'auto',          # 'auto' = выберет GPU, если есть
+    use_8bit: bool = True,         # включить 8‑битное квантование
+    token: str = None
+):
+    # 1. Токенизатор
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_auth_token=token)
-    model = AutoModelForCausalLM.from_pretrained(model_id, use_auth_token=token)
-    model.to(device)
+
+    # 2. Модель с оптимальными параметрами для инференса
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        use_auth_token=token,
+        device_map="auto",               # автоматически распределит по доступным устройствам
+        low_cpu_mem_usage=True,          # снизит пиковое потребление CPU-памяти при загрузке
+        torch_dtype=torch.float16,       # загрузит веса в FP16
+        load_in_8bit=use_8bit            # при наличии bitsandbytes — квантование до 8‑бит
+    )
+
+    model.eval()
     return tokenizer, model
 
-def structure_prompt(tokenizer, model, description: str, max_length: int = 128, device: str = 'cpu') -> str:
-    """
-    Формирует четкий промпт для генерации JSON-структуры датасета.
-
-    Args:
-        tokenizer: Токенизатор модели.
-        model: Модель для структурирования.
-        description: Пользовательское описание датасета.
-        max_length: Максимальная длина генерируемого текста.
-        device: Устройство для вычислений.
-
-    Returns:
-        сгенерированный текст-промпт
-    """
-    system_instruction = (
-        "Ты помогаешь формировать четкий JSON-шаблон для генерации датасета на основе описания."
+def structure_prompt_v2(
+    tokenizer, 
+    model, 
+    description: str, 
+    max_length: int = 1024, 
+    device: str = 'cpu'
+) -> str:
+    instruction = (
+        "Ты — помощник по созданию структуры синтетических датасетов. "
+        "На основе пользовательского описания ты должен выдать чёткий и полный JSON-шаблон с примерами значений, "
+        "где для каждого поля указывается тип данных и пример. "
+        "Не добавляй лишних пояснений — только чистый JSON-шаблон.\n\n"
+        "Пример:\n"
+        "Описание: Датасет о фильмах: название, жанр, год выпуска, рейтинг.\n"
+        "Шаблон:\n"
+        "{\n"
+        "  \"title\": \"Inception\",\n"
+        "  \"genre\": \"Sci-Fi\",\n"
+        "  \"year\": 2010,\n"
+        "  \"rating\": 8.8\n"
+        "}\n\n"
+        f"Описание: {description}\n"
+        "Шаблон:\n"
     )
-    input_text = system_instruction + "\nОписание: " + description + "\nШаблон:"
-    inputs = tokenizer(input_text, return_tensors='pt').to(device)
-    output_ids = model.generate(
-        **inputs,
-        max_length=max_length,
-        num_beams=5,
-        early_stopping=True,
-        no_repeat_ngram_size=2
-    )
-    prompt_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    # Оставляем после 'Шаблон:'
-    return prompt_text.split('Шаблон:')[-1].strip()
-
-def generate_chunk(tokenizer, model, prompt: str, max_length: int = 256, device: str = 'cpu') -> dict:
-    """
-    Генерирует один JSON-чанк данных по заданному промпту.
-
-    Args:
-        tokenizer: Токенизатор модели.
-        model: Модель для генерации.
-        prompt: Промпт, описывающий формат и содержание.
-        max_length: Максимальная длина ответа.
-        device: Устройство для вычислений.
-
-    Returns:
-        Python-словарь, полученный из сгенерированного JSON.
-    """
-    inputs = tokenizer(prompt, return_tensors='pt').to(device)
-    output_ids = model.generate(
-        **inputs,
-        max_length=max_length,
-        temperature=0.7,
-        top_p=0.9,
-        do_sample=True,
-        eos_token_id=tokenizer.eos_token_id
-    )
-    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    # Пытаемся вырезать JSON из текста
+    # Переносим тензоры на нужное устройство
+    inputs = tokenizer(instruction, return_tensors='pt', truncation=True).to(device)
+    with torch.inference_mode():
+        output_ids = model.generate(
+            **inputs,
+            max_length=max_length,
+            temperature=0.7,
+            top_p=0.95,
+            num_beams=5,
+            early_stopping=True,
+            no_repeat_ngram_size=2,
+            eos_token_id=tokenizer.eos_token_id
+        )
+    result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    # Обрезаем префикс
+    json_part = result.split('Шаблон:')[-1].strip()
     try:
-        json_start = text.find('{')
-        json_text = text[json_start:]
-        return json.loads(json_text)
-    except Exception:
-        # Возвращаем необработанный текст в случае ошибки
-        return {'__raw__': text}
+        return json.loads(json_part)
+    except json.JSONDecodeError:
+        return {"raw": json_part}
+
+
+def generate_chunk(tokenizer, model, prompt: str, max_length: int = 256) -> dict:
+    with torch.inference_mode():
+        inputs = tokenizer(prompt, return_tensors='pt', truncation=True).to(model.device)
+        output_ids = model.generate(
+            **inputs,
+            max_length=max_length,
+            temperature=0.8,
+            top_p=0.95,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+    generated = tokenizer.decode(output_ids[0], skip_special_tokens=True)[len(prompt):].strip()
+    try:
+        return json.loads(generated)
+    except json.JSONDecodeError:
+        return {"raw": generated}
