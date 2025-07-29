@@ -13,40 +13,24 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import json
 import torch
 from prompts import (
-    STRUCTURE_GENERATION_PROMPT, 
-    DATA_GENERATION_PROMPT, 
+    EXTRACT_FIELDS_PROMPT,
+    DATA_GENERATION_PROMPT,
     CONTEXTUAL_DATA_GENERATION_PROMPT,
     DATASET_TYPE_PROMPTS,
     JSON_REPAIR_PROMPT
 )
 
-def extract_json(text: str) -> str:
-    """
-    Простое извлечение JSON из текста.
-    """
-    # Убираем markdown
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*', '', text)
-    
-    # Ищем первую { и последнюю }
-    start = text.find('{')
-    end = text.rfind('}') + 1
-    
-    if start == -1 or end <= start:
-        return None
-        
-    json_text = text[start:end]
-    
-    # Убираем лишние запятые
-    json_text = re.sub(r',\s*}', '}', json_text)
-    json_text = re.sub(r',\s*]', ']', json_text)
-    
-    return json_text
 
 
 def safe_json_parse(text: str) -> dict:
     """
-    Безопасный парсинг JSON с несколькими попытками очистки.
+    Безопасно разбирает строку JSON, предпринимая несколько попыток исправить распространенные ошибки.
+
+    Args:
+        text: Строка для разбора.
+
+    Returns:
+        Словарь, если разбор удался, иначе None.
     """
     if not text:
         return None
@@ -123,10 +107,22 @@ def safe_json_parse(text: str) -> dict:
 
 def load_model(
     model_id: str,
-    device: str = 'auto',          # 'auto' = выберет GPU, если есть
-    use_8bit: bool = True,         # включить 8‑битное квантование
+    device: str = 'auto',
+    use_8bit: bool = True,
     token: str = None
 ):
+    """
+    Загружает модель и токенизатор Hugging Face с возможностью квантования.
+
+    Args:
+        model_id (str): Идентификатор модели на Hugging Face Hub.
+        device (str): Устройство для загрузки модели ('auto', 'cuda', 'cpu').
+        use_8bit (bool): Использовать ли 8-битное квантование для уменьшения потребления памяти.
+        token (str): Токен Hugging Face для доступа к закрытым моделям.
+
+    Returns:
+        Кортеж (tokenizer, model).
+    """
     # Используем новый параметр token вместо use_auth_token
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     
@@ -151,51 +147,102 @@ def structure_prompt_v2(
     tokenizer,
     model,
     description: str,
-    max_length: int = 1024  # Увеличено для более длинных промптов
+    max_length: int = 1024
 ) -> dict:
     """
-    Создает простую структуру на основе описания датасета.
-    """
-    structure_prompt = STRUCTURE_GENERATION_PROMPT.format(description=description)
+    Создает структуру JSON на основе описания датасета.
 
+    Использует модель для извлечения пар "русское_название:english_key",
+    а затем программно строит полную структуру JSON.
+
+    Args:
+        tokenizer: Токенизатор модели.
+        model: Загруженная модель.
+        description: Текстовое описание датасета, предоставленное пользователем.
+        max_length: Максимальная длина входа для токенизатора.
+
+    Returns:
+        Словарь со структурой датасета или None в случае неудачи.
+    """
+    # Step 1: Use the model to extract "russian_name:english_key" pairs
+    prompt = EXTRACT_FIELDS_PROMPT.format(description=description)
     with torch.inference_mode():
         inputs = tokenizer(
-            structure_prompt,
+            prompt,
             return_tensors='pt',
             truncation=True,
             max_length=max_length
         ).to(model.device)
-        
+
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=512,  # Увеличено для сложных структур
-            temperature=0.2,
-            top_p=0.8,
-            do_sample=True,
+            max_new_tokens=200,
+            temperature=0.1,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id
         )
-    
+
+    # Decode and clean the model's response
     generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    if prompt in generated_text:
+        generated_text = generated_text.replace(prompt, "")
     
-    # Убираем исходный промпт
-    if structure_prompt in generated_text:
-        generated_text = generated_text.replace(structure_prompt, "").strip()
+    field_pairs_str = generated_text.split("Результат:")[-1].strip()
+
+    if not field_pairs_str or ':' not in field_pairs_str:
+        return None
+
+    # Step 2: Parse the response and build the JSON structure in Python
+    fields = {}
+    example_record = {}
     
-    # Извлекаем JSON
-    json_text = extract_json(generated_text)
-    if json_text:
-        try:
-            # Используем безопасный парсер
-            structure = safe_json_parse(json_text)
-            if isinstance(structure, dict) and 'fields' in structure and 'example_record' in structure:
-                print(f"Модель создала структуру с полями: {list(structure['fields'].keys())}")
-                return structure
-        except json.JSONDecodeError:
-            pass # Ошибка будет обработана ниже
-    
-    print("Не удалось получить структуру от модели. Пожалуйста, попробуйте переформулировать описание.")
-    return None
+    try:
+        # Очищаем строку от лишних символов и переносов строк
+        field_pairs_str = re.sub(r'[\n\r]+', ' ', field_pairs_str)
+        field_pairs_str = re.sub(r'\s+', ' ', field_pairs_str)
+        
+        # Use regex to robustly find all "russian_name:english_key:example" triplets
+        # Останавливаемся на запятой или конце строки
+        pattern = re.compile(r'([а-яА-ЯёЁ -]+):([a-zA-Z_]+):([^,]*?)(?=,|$)')
+        matches = pattern.findall(field_pairs_str)
+
+        for rus_name, eng_key, example in matches:
+            rus_name = rus_name.strip()
+            eng_key = eng_key.strip()
+            example = example.strip()
+            
+            # Убираем возможные кавычки и лишние символы из примера
+            example = re.sub(r'["\\n\\r]+.*$', '', example).strip()
+
+            if not rus_name or not eng_key:
+                continue
+
+            # Используем пример из описания пользователя, если есть
+            if example:
+                example_value = example
+            else:
+                example_value = f'Example for {eng_key}'
+
+            fields[eng_key] = {
+                'type': 'string',
+                'description': f'{rus_name.capitalize()}. Пример: {example_value}' if example else rus_name.capitalize(),
+                'example': example_value
+            }
+            example_record[eng_key] = example_value
+
+        if not fields:
+            return None
+
+        structure = {
+            'fields': fields,
+            'example_record': example_record
+        }
+        
+        return structure
+
+    except Exception:
+        return None
 
 
 def generate_chunk(
@@ -206,8 +253,17 @@ def generate_chunk(
     max_new_tokens: int = 200
 ) -> dict:
     """
-    Генерирует один чанк данных на основе структуры.
-    Принимает структуру как dict; возвращает словарь с данными.
+    Генерирует одну запись данных (чанк) на основе предоставленной структуры.
+
+    Args:
+        tokenizer: Токенизатор модели.
+        model: Загруженная модель.
+        structure (dict): Словарь, описывающий структуру данных.
+        description (str): Общее описание датасета для контекста.
+        max_new_tokens (int): Максимальное количество новых токенов для генерации.
+
+    Returns:
+        Словарь с сгенерированными данными или None, если генерация или разбор не удались.
     """
     if not isinstance(structure, dict) or 'fields' not in structure:
         return {"error": "Неверный формат структуры"}

@@ -17,7 +17,8 @@ ENV_FILE = ".env"
 TOKEN_KEY = "HF_TOKEN"
 
 MODEL_CHOICES = [
-    ("Qwen3-4B", "Qwen/Qwen3-4B")
+    ("Qwen3-4B", "Qwen/Qwen3-4B"),
+    ("Qwen3-8B-FP8", "Qwen/Qwen3-8B-FP8")
 ]
 
 def load_env():
@@ -64,49 +65,54 @@ def load_token():
     return None
 
 def save_token(token):
-    """Сохраняет токен в .env файл""" #да,я написал функцию для одной строчки код, и че вы мне сделаете
+    """Сохраняет токен в .env файл."""
     return save_env(TOKEN_KEY, token)
 
 def get_token():
-    """Получает токен: сначала пытается загрузить из файла, если нет - запрашивает у пользователя"""
+    """Получает токен: сначала пытается загрузить из файла, если не удается, запрашивает у пользователя."""
     token = load_token()
     if token:
-        print(f"Найден сохранённый токен: {token[:8]}...")
-        use_saved = input("Использовать сохранённый токен? (y/n): ").strip().lower()
-        if use_saved in ['y', 'yes', 'да', 'д', '']:
+        use_saved = input(f"Найден сохраненный токен: {token[:8]}... Использовать его? (y/n): ").strip().lower()
+        if use_saved in ['y', 'yes', '']:
             return token
     
-    # Запрашиваем новый токен
-    token = input("Введите ваш Hugging Face токен (или оставьте пустым): ").strip()
+    # Request a new token
+    token = input("Введите ваш токен Hugging Face (или оставьте пустым): ").strip()
     if token:
         save_token(token)
-        print("Токен сохранён для будущих запусков.")
+        print("Токен сохранен для будущих запусков.")
     return token
-
-def choose_model(prompt_text):
-    print(prompt_text)
-    for idx, (name, _) in enumerate(MODEL_CHOICES, 1):
-        print(f"  {idx}. {name}")
-    while True:
-        choice = input("Введите номер модели: ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(MODEL_CHOICES):
-            return MODEL_CHOICES[int(choice)-1][1]
-        print("Некорректный выбор. Попробуйте снова.")
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n=== Генератор датасетов  ===\nИспользуем устройство: {device.upper()}\n")
 
-    # Выбор модели
-    model_id = choose_model("Выберите модель (одна и та же будет использована для структуры и генерации):")
+    # Model selection
+    print("\nДоступные модели:")
+    for i, (name, model_id) in enumerate(MODEL_CHOICES, 1):
+        print(f"{i}. {name} ({model_id})")
+    
+    while True:
+        choice = input(f"\nВыберите модель (1-{len(MODEL_CHOICES)}) или нажмите Enter для модели по умолчанию ({MODEL_CHOICES[0][0]}): ").strip()
+        
+        if not choice:  # Default choice
+            model_id = MODEL_CHOICES[0][1]
+            print(f"Выбрана модель по умолчанию: {MODEL_CHOICES[0][0]}")
+            break
+        elif choice.isdigit() and 1 <= int(choice) <= len(MODEL_CHOICES):
+            selected_idx = int(choice) - 1
+            model_id = MODEL_CHOICES[selected_idx][1]
+            print(f"Выбрана модель: {MODEL_CHOICES[selected_idx][0]}")
+            break
+        else:
+            print(f"Пожалуйста, введите число от 1 до {len(MODEL_CHOICES)} или нажмите Enter.")
 
-    # Токен
+    # Token
     token = get_token()
     if token:
         os.environ['HUGGINGFACE_TOKEN'] = token
 
-    # Описание датасета
-    print("\nВведите описание датасета. Для завершения нажмите Enter 2 раза")
+    # Dataset description
+    print("\\nВведите описание датасета (нажмите Enter дважды для завершения):")
     lines = []
     while True:
         line = input()
@@ -118,66 +124,62 @@ def main():
         print("Ошибка: описание не может быть пустым.")
         return
 
-    # Количество чанков
+    # Number of chunks
     while True:
-        n_chunks = input("Количество чанков для генерации (по умолчанию 10): ").strip() or "10"
+        n_chunks = input("Количество частей для генерации (по умолчанию 10): ").strip() or "10"
         if n_chunks.isdigit() and int(n_chunks) > 0:
             n_chunks = int(n_chunks)
             break
-        print("Введите положительное целое число.")
+        print("Пожалуйста, введите положительное целое число.")
 
-    # Путь сохранения
+    # Save path
     out = os.getcwd()
 
-    print("\nЗагрузка модели...")
+    print("Загрузка модели...")
     tokenizer, model = load_model(model_id, device=device, token=token)
 
-    print("Формируем шаблон структуры...")
+    print("Создание шаблона структуры...")
     structure = None
-    for attempt in range(3): # 3 попытки на создание структуры
+    for attempt in range(3): # 3 attempts to create the structure
         structure = structure_prompt_v2(tokenizer, model, description)
         if structure:
+            print("\nСтруктура сгенерирована успешно:")
+            print(json.dumps(structure, ensure_ascii=False, indent=2))
             break
-        print(f"Попытка {attempt + 1} не удалась, пробую снова...")
 
     if not structure:
-        print("Не удалось создать структуру датасета после нескольких попыток. Завершение работы.")
+        print("Не удалось создать структуру датасета после нескольких попыток. Выход.")
         return
-    print(f"Сформированная структура:\n{json.dumps(structure, ensure_ascii=False, indent=2)}\n")
 
-    # Генерация и запись чанков в файл
+    # Generate and write chunks to file
     dataset = []
     output_file = os.path.join(out, "synthetic_dataset.json")
     
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write('[\n') # Открываем JSON-массив
+        f.write('[\n') # Open JSON array
         
         for i in range(1, n_chunks + 1):
-            print(f"Генерация чанка {i}/{n_chunks}...")
+            print(f"Генерация части {i}/{n_chunks}...")
             
-            # Повторяем генерацию, пока не получим валидный и уникальный чанк
+            # Retry generation until a valid and unique chunk is obtained
             while True:
                 chunk = generate_chunk(tokenizer, model, structure, description)
                 
-                # Проверяем, что чанк сгенерирован и не является дубликатом
                 if chunk and chunk not in dataset:
-                    dataset.append(chunk) # Для проверки дубликатов
+                    dataset.append(chunk) # For duplicate checking
                     
-                    # Добавляем запятую перед новым элементом (кроме первого)
                     if i > 1:
                         f.write(',\n')
                     
-                    # Записываем чанк в файл
                     json.dump(chunk, f, ensure_ascii=False, indent=2)
-                    f.flush() # Принудительно записываем данные на диск
+                    f.flush() # Force write data to disk
                     break
                 elif chunk in dataset:
-                    print(f"Обнаружен дубликат для чанка {i}. Повторная генерация...")
-                # Если chunk равен None, цикл просто продолжится для новой попытки
+                    print(f"Обнаружен дубликат для части {i}. Повторная генерация...")
         
-        f.write('\n]') # Закрываем JSON-массив
+        f.write('\n]') # Close JSON array
 
-    print(f"\nГотово! Датасет сохранен: {output_file}\n")
+    print(f"\nГотово! Датасет сохранен в: {output_file}\n")
 
 if __name__ == '__main__':
     main()
