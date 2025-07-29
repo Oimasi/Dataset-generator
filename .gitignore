@@ -1,0 +1,40 @@
+# Переменные окружения и токены
+.env
+*.env
+
+# Файлы кэша Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Виртуальные окружения
+venv/
+env/
+ENV/
+
+# Сгенерированные датасеты
+*.json
+synthetic_dataset*.json
+
+# Логи
+*.log
+
+# Временные файлы
+*.tmp
+*.temp
+
+# Модели (если локально кэшируются)
+models/
+cache/
+
+# IDE файлы
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini

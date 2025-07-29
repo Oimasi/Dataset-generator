@@ -133,7 +133,16 @@ def main():
     tokenizer, model = load_model(model_id, device=device, token=token)
 
     print("Формируем шаблон структуры...")
-    structure = structure_prompt_v2(tokenizer, model, description)
+    structure = None
+    for attempt in range(3): # 3 попытки на создание структуры
+        structure = structure_prompt_v2(tokenizer, model, description)
+        if structure:
+            break
+        print(f"Попытка {attempt + 1} не удалась, пробую снова...")
+
+    if not structure:
+        print("Не удалось создать структуру датасета после нескольких попыток. Завершение работы.")
+        return
     print(f"Сформированная структура:\n{json.dumps(structure, ensure_ascii=False, indent=2)}\n")
 
     # Генерация и запись чанков в файл
@@ -146,10 +155,12 @@ def main():
         for i in range(1, n_chunks + 1):
             print(f"Генерация чанка {i}/{n_chunks}...")
             
-            # Повторяем генерацию, пока не получим уникальный чанк
+            # Повторяем генерацию, пока не получим валидный и уникальный чанк
             while True:
                 chunk = generate_chunk(tokenizer, model, structure, description)
-                if chunk not in dataset:
+                
+                # Проверяем, что чанк сгенерирован и не является дубликатом
+                if chunk and chunk not in dataset:
                     dataset.append(chunk) # Для проверки дубликатов
                     
                     # Добавляем запятую перед новым элементом (кроме первого)
@@ -160,8 +171,9 @@ def main():
                     json.dump(chunk, f, ensure_ascii=False, indent=2)
                     f.flush() # Принудительно записываем данные на диск
                     break
-                else:
+                elif chunk in dataset:
                     print(f"Обнаружен дубликат для чанка {i}. Повторная генерация...")
+                # Если chunk равен None, цикл просто продолжится для новой попытки
         
         f.write('\n]') # Закрываем JSON-массив
 

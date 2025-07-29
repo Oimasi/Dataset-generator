@@ -194,90 +194,8 @@ def structure_prompt_v2(
         except json.JSONDecodeError:
             pass # Ошибка будет обработана ниже
     
-    print("Не удалось получить структуру от модели, использую эвристический метод...")
-    return create_heuristic_structure(description)
-def create_heuristic_structure(description: str) -> dict:
-    """
-    Создает структуру датасета на основе простого эвристического анализа описания.
-    Если модель не справилась, эта функция пытается извлечь поля из строки,
-    разделенной запятыми или новыми строками.
-    """
-    
-    # Словарь для транслитерации
-    translit_map = {
-        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo',
-        'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n',
-        'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h',
-        'ц': 'c', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '',
-        'э': 'e', 'ю': 'yu', 'я': 'ya'
-    }
-    
-    def transliterate(text):
-        # Заменяем пробелы на подчеркивания
-        text_lower = text.lower()
-        text_with_underscores = re.sub(r'\s+', '_', text_lower)
-        # Применяем транслитерацию
-        return ''.join(translit_map.get(char, char) for char in text_with_underscores)
-
-    # Убираем возможный префикс (например, "Датасет: ")
-    clean_description = re.sub(r'^\s*.*[:：]\s*', '', description, count=1).strip()
-    
-    # Разделяем поля по запятым, точкам с запятой или новым строкам
-    field_names_rus = re.split(r'[,;\n]+', clean_description)
-    field_names_rus = [name.strip() for name in field_names_rus if name.strip()]
-
-    # Если не удалось найти поля, возвращаем базовую структуру
-    if not field_names_rus:
-        return {
-            "fields": {
-                "text": {
-                    "type": "string",
-                    "description": "Основной текст, сгенерированный на основе темы",
-                    "example": f"Пример текста о: {description}"
-                }
-            },
-            "example_record": {
-                "text": f"Пример текста о: {description}"
-            }
-        }
-
-    fields = {}
-    example_record = {}
-
-    for name_rus in field_names_rus:
-        # Создаем ключ на английском
-        name_en = transliterate(name_rus)
-        # Очищаем от всего, кроме букв, цифр и подчеркивания
-        name_en = re.sub(r'[^\w_]', '', name_en)
-
-        if not name_en:
-            continue
-
-        fields[name_en] = {
-            'type': 'string',
-            'description': name_rus.capitalize(),
-            'example': f'Пример для {name_rus}'
-        }
-        example_record[name_en] = f'Example for {name_en}'
-
-    if not fields:
-         return {
-            "fields": {
-                "text": {
-                    "type": "string",
-                    "description": "Основной текст, сгенерированный на основе темы",
-                    "example": f"Пример текста о: {description}"
-                }
-            },
-            "example_record": {
-                "text": f"Пример текста о: {description}"
-            }
-        }
-
-    return {
-        'fields': fields,
-        'example_record': example_record
-    }
+    print("Не удалось получить структуру от модели. Пожалуйста, попробуйте переформулировать описание.")
+    return None
 
 
 def generate_chunk(
@@ -363,35 +281,8 @@ def generate_chunk(
         print(f"Успешно создана запись с полями: {list(result.keys())}")
         return result
     
-    # Если не удалось распарсить, создаем базовую запись
-    print("Не удалось распарсить сгенерированные данные, создаю базовую запись...")
-    return generate_fallback_record(structure, generated_text)
+    # Если не удалось распарсить, возвращаем None для повторной попытки
+    print("Не удалось распарсить сгенерированные данные, будет произведена повторная попытка...")
+    return None
 
 
-def generate_fallback_record(structure: dict, raw_text: str = "") -> dict:
-    """
-    Создает базовую запись на основе структуры, если генерация не удалась.
-    """
-    record = {}
-    
-    for field_name, field_info in structure['fields'].items():
-        field_type = field_info['type']
-        
-        if field_type == 'string':
-            if raw_text.strip():
-                # Пытаемся использовать часть сгенерированного текста
-                record[field_name] = raw_text.strip()[:100] + "..."
-            else:
-                record[field_name] = f"Пример {field_name}"
-        elif field_type == 'number':
-            import random
-            record[field_name] = random.randint(1, 100)
-        elif field_type == 'boolean':
-            import random
-            record[field_name] = random.choice([True, False])
-        elif field_type == 'array':
-            record[field_name] = [f"элемент_{field_name}_1", f"элемент_{field_name}_2"]
-        else:
-            record[field_name] = f"значение_{field_name}"
-    
-    return record
