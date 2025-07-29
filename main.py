@@ -4,10 +4,10 @@ import torch
 import base64
 import warnings
 
-# Отключаем все предупреждения, они тока мешают и ничего не делают 
+# Отключаем все предупреждения - они только засоряют вывод
 warnings.filterwarnings('ignore')
 
-# Отключаем предупреждения TensorFlow (должно быть установлено до импорта transformers)
+# Отключаем предупреждения TensorFlow - нужно сделать до импорта transformers
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
@@ -39,7 +39,7 @@ def load_env():
 def save_env(key, value):
     """Сохраняет переменную в .env файл с простым кодированием"""
     try:
-        # Кодируем токен в base64 для минимальной обфускации
+        # Кодируем токен в base64 чтобы не светился в открытом виде
         encoded_value = base64.b64encode(value.encode()).decode()
         
         env_vars = load_env()
@@ -58,7 +58,7 @@ def load_token():
     env_vars = load_env()
     if TOKEN_KEY in env_vars:
         try:
-            # Декодируем токен из base64
+            # Декодируем токен обратно
             return base64.b64decode(env_vars[TOKEN_KEY]).decode()
         except Exception:
             return None
@@ -76,7 +76,7 @@ def get_token():
         if use_saved in ['y', 'yes', '']:
             return token
     
-    # Request a new token
+    # Запрашиваем новый токен
     token = input("Введите ваш токен Hugging Face (или оставьте пустым): ").strip()
     if token:
         save_token(token)
@@ -86,7 +86,7 @@ def get_token():
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Model selection
+    # Выбор модели
     print("\nДоступные модели:")
     for i, (name, model_id) in enumerate(MODEL_CHOICES, 1):
         print(f"{i}. {name} ({model_id})")
@@ -94,7 +94,7 @@ def main():
     while True:
         choice = input(f"\nВыберите модель (1-{len(MODEL_CHOICES)}) или нажмите Enter для модели по умолчанию ({MODEL_CHOICES[0][0]}): ").strip()
         
-        if not choice:  # Default choice
+        if not choice:  # Выбираем по умолчанию
             model_id = MODEL_CHOICES[0][1]
             print(f"Выбрана модель по умолчанию: {MODEL_CHOICES[0][0]}")
             break
@@ -106,12 +106,12 @@ def main():
         else:
             print(f"Пожалуйста, введите число от 1 до {len(MODEL_CHOICES)} или нажмите Enter.")
 
-    # Token
+    # Получаем токен
     token = get_token()
     if token:
         os.environ['HUGGINGFACE_TOKEN'] = token
 
-    # Dataset description
+    # Описание датасета
     print("\\nВведите описание датасета (нажмите Enter дважды для завершения):")
     lines = []
     while True:
@@ -124,7 +124,7 @@ def main():
         print("Ошибка: описание не может быть пустым.")
         return
 
-    # Number of chunks
+    # Количество частей
     while True:
         n_chunks = input("Количество частей для генерации (по умолчанию 10): ").strip() or "10"
         if n_chunks.isdigit() and int(n_chunks) > 0:
@@ -132,7 +132,7 @@ def main():
             break
         print("Пожалуйста, введите положительное целое число.")
 
-    # Save path
+    # Путь для сохранения
     out = os.getcwd()
 
     print("Загрузка модели...")
@@ -140,7 +140,7 @@ def main():
 
     print("Создание шаблона структуры...")
     structure = None
-    for attempt in range(3): # 3 attempts to create the structure
+    for attempt in range(3): # Пробуем создать структуру несколько раз
         structure = structure_prompt_v2(tokenizer, model, description)
         if structure:
             print("\nСтруктура сгенерирована успешно:")
@@ -151,33 +151,33 @@ def main():
         print("Не удалось создать структуру датасета после нескольких попыток. Выход.")
         return
 
-    # Generate and write chunks to file
+    # Генерируем части и записываем в файл
     dataset = []
     output_file = os.path.join(out, "synthetic_dataset.json")
     
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write('[\n') # Open JSON array
+        f.write('[\n') # Открываем JSON массив
         
         for i in range(1, n_chunks + 1):
             print(f"Генерация части {i}/{n_chunks}...")
             
-            # Retry generation until a valid and unique chunk is obtained
+            # Повторяем генерацию пока не получим уникальную запись
             while True:
                 chunk = generate_chunk(tokenizer, model, structure, description)
                 
                 if chunk and chunk not in dataset:
-                    dataset.append(chunk) # For duplicate checking
+                    dataset.append(chunk) # Для проверки дубликатов
                     
                     if i > 1:
                         f.write(',\n')
                     
                     json.dump(chunk, f, ensure_ascii=False, indent=2)
-                    f.flush() # Force write data to disk
+                    f.flush() # Принудительно записываем на диск
                     break
                 elif chunk in dataset:
                     print(f"Обнаружен дубликат для части {i}. Повторная генерация...")
         
-        f.write('\n]') # Close JSON array
+        f.write('\n]') # Закрываем JSON массив
 
     print(f"\nГотово! Датасет сохранен в: {output_file}\n")
 

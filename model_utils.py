@@ -2,10 +2,10 @@ import warnings
 import os
 import re
 
-# Отключаем все предупреждения
+# Выключаем все предупреждения, чтобы не мешали
 warnings.filterwarnings('ignore')
 
-# Отключаем предупреждения TensorFlow
+# Убираем предупреждения TensorFlow, чтобы экран не засоряли
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
@@ -35,13 +35,13 @@ def safe_json_parse(text: str) -> dict:
     if not text:
         return None
     
-    # Попытка 1: прямой парсинг
+    # Пробуем просто распарсить строку прямо
     try:
         return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
     
-    # Попытка 2: ищем JSON блок между фигурными скобками
+    # Пробуем найти блоки JSON между фигурными скобками
     try:
         # Находим все возможные JSON блоки
         pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
@@ -58,7 +58,7 @@ def safe_json_parse(text: str) -> dict:
     except Exception:
         pass
     
-    # Попытка 3: более простой поиск
+    # Пытаемся более простым способом найти JSON
     try:
         # Ищем от первой { до последней }
         start = text.find('{')
@@ -75,7 +75,7 @@ def safe_json_parse(text: str) -> dict:
     except (json.JSONDecodeError, ValueError):
         pass
     
-    # Попытка 4: поиск многострочного JSON
+    # Ищем многострочный JSON, если предыдущие не сработали
     try:
         lines = text.split('\n')
         json_lines = []
@@ -123,7 +123,7 @@ def load_model(
     Returns:
         Кортеж (tokenizer, model).
     """
-    # Используем новый параметр token вместо use_auth_token
+    # Теперь используем token вместо use_auth_token
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
     
     # Создаем конфигурацию квантования
@@ -164,7 +164,7 @@ def structure_prompt_v2(
     Returns:
         Словарь со структурой датасета или None в случае неудачи.
     """
-    # Step 1: Use the model to extract "russian_name:english_key" pairs
+    # Шаг 1: используем модель для извлечения пар "русское_название:english_key"
     prompt = EXTRACT_FIELDS_PROMPT.format(description=description)
     with torch.inference_mode():
         inputs = tokenizer(
