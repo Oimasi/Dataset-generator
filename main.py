@@ -3,6 +3,8 @@ import json
 import torch
 import base64
 import warnings
+import time
+from tqdm import tqdm
 
 # Отключаем все предупреждения - они только засоряют вывод
 warnings.filterwarnings('ignore')
@@ -72,11 +74,10 @@ def get_token():
     """Получает токен: сначала пытается загрузить из файла, если не удается, запрашивает у пользователя."""
     token = load_token()
     if token:
-        use_saved = input(f"Найден сохраненный токен: {token[:8]}... Использовать его? (y/n): ").strip().lower()
-        if use_saved in ['y', 'yes', '']:
-            return token
+        # Автоматически используем сохраненный токен без запроса
+        return token
     
-    # Запрашиваем новый токен
+    # Запрашиваем новый токен только если его нет
     token = input("Введите ваш токен Hugging Face (или оставьте пустым): ").strip()
     if token:
         save_token(token)
@@ -112,14 +113,7 @@ def main():
         os.environ['HUGGINGFACE_TOKEN'] = token
 
     # Описание датасета
-    print("\nВведите описание датасета (нажмите Enter дважды для завершения):")
-    lines = []
-    while True:
-        line = input()
-        if not line:
-            break
-        lines.append(line)
-    description = "\n".join(lines).strip()
+    description = input("Введите описание датасета: ").strip()
     if not description:
         print("Ошибка: описание не может быть пустым.")
         return
@@ -135,16 +129,16 @@ def main():
     # Путь для сохранения
     out = os.getcwd()
 
-    print("Загрузка модели...")
     tokenizer, model = load_model(model_id, device=device, token=token)
 
-    print("Создание шаблона структуры...")
+    print("Создание шаблона структуры...")   
     structure = None
     for attempt in range(3): # Пробуем создать структуру несколько раз
         structure = structure_prompt_v2(tokenizer, model, description)
         if structure:
             print("\nСтруктура сгенерирована успешно:")
-            print(json.dumps(structure, ensure_ascii=False, indent=2))
+            for key, value in structure['fields'].items():
+                print(f"{key} - {value['type']}")
             break
 
     if not structure:
@@ -159,7 +153,8 @@ def main():
         f.write('[\n') # Открываем JSON массив
         
         for i in range(1, n_chunks + 1):
-            print(f"Генерация части {i}/{n_chunks}...")
+            start_time = time.time()
+            print(f"Генерация части {i}/{n_chunks} ({i/n_chunks*100:.1f}%)...")
             
             # Повторяем генерацию пока не получим уникальную запись
             while True:
@@ -173,6 +168,7 @@ def main():
                     
                     json.dump(chunk, f, ensure_ascii=False, indent=2)
                     f.flush() # Принудительно записываем на диск
+                    print(f"Успешно создана запись с полями: {list(chunk.keys())} ({round(time.time() - start_time, 2)} сек.)")
                     break
                 elif chunk in dataset:
                     print(f"Обнаружен дубликат для части {i}. Повторная генерация...")

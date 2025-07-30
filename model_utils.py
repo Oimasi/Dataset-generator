@@ -8,6 +8,7 @@ warnings.filterwarnings('ignore')
 # Убираем предупреждения TensorFlow, чтобы экран не засоряли
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import json
@@ -105,7 +106,173 @@ def safe_json_parse(text: str) -> dict:
     return None
 
 
-def enhance_field_description(field_name: str, example_value: str, original_description: str) -> str:
+def detect_field_type(field_name: str, example_value: str, original_description: str) -> str:
+    """
+    Определяет тип поля на основе его названия, примера и контекста.
+    
+    Args:
+        field_name: Русское название поля
+        example_value: Пример значения поля
+        original_description: Исходное описание датасета от пользователя
+    
+    Returns:
+        Тип поля: 'integer', 'number', 'string', 'boolean', 'array'
+    """
+    field_lower = field_name.lower()
+    example_lower = example_value.lower() if example_value else ""
+    description_lower = original_description.lower()
+    
+    # ПЕРВЫЙ ПРИОРИТЕТ: Проверяем на явно текстовые поля по примерам
+    # Если в примере есть буквы (не цифры), запятые между словами, или текстовые значения - это строка
+    if example_value and example_value.strip():
+        # Убираем пробелы и проверяем содержимое
+        clean_example = example_value.strip()
+        
+        # Если пример содержит буквы и не является чистым числом
+        if re.search(r'[а-яА-ЯёЁa-zA-Z]', clean_example):
+            # Исключение: если это явно диапазон чисел ("от 1 до 10", "1-5")
+            if not (re.search(r'от\s+\d+.*до\s+\d+', example_lower) or 
+                   re.search(r'^\d+\s*-\s*\d+$', clean_example)):
+                return 'string'
+        
+        # Если пример содержит запятые между словами ("продукты, массаж, картошка")
+        if ',' in clean_example and re.search(r'[а-яА-ЯёЁa-zA-Z]', clean_example):
+            return 'string'
+        
+        # Если пример является чисто числовым (только цифры)
+        if re.match(r'^\d+$', clean_example):
+            return 'integer'
+        
+        # Если пример является числом с плавающей точкой
+        if re.match(r'^\d+\.\d+$', clean_example):
+            return 'number'
+    
+    # ВТОРОЙ ПРИОРИТЕТ: Определение по ключевым словам в названии поля
+    # Явно текстовые поля
+    string_keywords = ['название', 'наименование', 'имя', 'описание', 'комментарий', 'текст', 'адрес', 'email', 'телефон', 'name', 'title', 'description', 'comment', 'text', 'address']
+    if any(keyword in field_lower for keyword in string_keywords):
+        return 'string'
+    
+    # Числовые поля (только если нет явных текстовых признаков)
+    integer_keywords = ['сумма', 'количество', 'число', 'цена', 'стоимость', 'возраст', 'год', 'рублей', 'руб', 'долларов', 'age', 'count', 'amount', 'price', 'cost', 'year']
+    number_keywords = ['рейтинг', 'процент', 'rating', 'percent', 'score']
+    boolean_keywords = ['статус', 'успешно', 'неуспешно', 'тип', 'является', 'status', 'success', 'failed']
+    
+    # Проверяем на числовые диапазоны в примере
+    if re.search(r'от\s+\d+.*до\s+\d+', example_lower) or re.search(r'^\d+\s*-\s*\d+$', example_value.strip() if example_value else ''):
+        return 'integer'  # Диапазон чисел -> integer
+    
+    # Проверяем на двоичные значения (0/1, true/false)
+    if re.search(r'[01]\s*или\s*[01]', example_lower) or 'товар - 0' in example_lower or 'услуга - 1' in example_lower:
+        return 'integer'  # Для совместимости с числовыми кодами
+    
+    # Проверяем ключевые слова в названии поля (только если пример не противоречит)
+    if any(keyword in field_lower for keyword in integer_keywords):
+        # Дополнительная проверка: если есть пример с текстом, игнорируем ключевое слово
+        if not (example_value and re.search(r'[а-яА-ЯёЁa-zA-Z]', example_value)):
+            return 'integer'
+    
+    if any(keyword in field_lower for keyword in number_keywords):
+        if not (example_value and re.search(r'[а-яА-ЯёЁa-zA-Z]', example_value)):
+            return 'number'
+    
+    if any(keyword in field_lower for keyword in boolean_keywords) and ('0' in example_lower or '1' in example_lower):
+        return 'integer'
+    
+    # Проверяем на даты
+    if re.search(r'дата|date', field_lower) or re.search(r'\d{4}-\d{2}-\d{2}', example_value if example_value else ''):
+        return 'string'  # Даты как строки
+    
+    # По умолчанию - строка (безопасный выбор)
+    return 'string'
+
+
+def convert_field_types(data: dict, field_definitions: dict) -> dict:
+    """
+    Конвертирует значения полей к правильным типам данных.
+    
+    Args:
+        data: Словарь с данными
+        field_definitions: Определения полей с типами
+    
+    Returns:
+        Обновленный словарь с правильными типами
+    """
+    converted_data = {}
+    
+    for field_name, value in data.items():
+        if field_name not in field_definitions:
+            converted_data[field_name] = value
+            continue
+        
+        field_type = field_definitions[field_name]['type']
+        
+        try:
+            if field_type == 'integer':
+                # Пробуем конвертировать в целое число
+                if isinstance(value, str):
+                    # Ищем числа в строке
+                    numbers = re.findall(r'\d+', value)
+                    if numbers:
+                        converted_data[field_name] = int(numbers[0])
+                    else:
+                        # Если не нашли число, генерируем случайное
+                        import random
+                        converted_data[field_name] = random.randint(10, 100000)
+                elif isinstance(value, (int, float)):
+                    converted_data[field_name] = int(value)
+                else:
+                    import random
+                    converted_data[field_name] = random.randint(10, 100000)
+                    
+            elif field_type == 'number':
+                # Конвертируем в число с плавающей точкой
+                if isinstance(value, str):
+                    # Ищем числа в строке
+                    numbers = re.findall(r'\d+\.?\d*', value)
+                    if numbers:
+                        converted_data[field_name] = float(numbers[0])
+                    else:
+                        import random
+                        converted_data[field_name] = round(random.uniform(1.0, 10.0), 2)
+                elif isinstance(value, (int, float)):
+                    converted_data[field_name] = float(value)
+                else:
+                    import random
+                    converted_data[field_name] = round(random.uniform(1.0, 10.0), 2)
+                    
+            elif field_type == 'boolean':
+                # Конвертируем в булево значение
+                if isinstance(value, str):
+                    value_lower = value.lower()
+                    if value_lower in ['true', 'yes', '1', 'да']:
+                        converted_data[field_name] = True
+                    elif value_lower in ['false', 'no', '0', 'нет']:
+                        converted_data[field_name] = False
+                    else:
+                        import random
+                        converted_data[field_name] = random.choice([True, False])
+                elif isinstance(value, (int, float)):
+                    converted_data[field_name] = bool(value)
+                else:
+                    converted_data[field_name] = bool(value)
+                    
+            elif field_type == 'string':
+                # Преобразуем в строку
+                converted_data[field_name] = str(value)
+                
+            else:
+                # По умолчанию оставляем как есть
+                converted_data[field_name] = value
+                
+        except (ValueError, TypeError):
+            # Если конвертация не удалась, оставляем оригинальное значение
+            converted_data[field_name] = value
+    
+    return converted_data
+
+
+def enhance_field_description(field_name: str, example_value: str, original_description: str, field_type: str) -> str:
     """
     Обогащает описание поля на основе контекста из исходного описания датасета.
     
@@ -113,6 +280,7 @@ def enhance_field_description(field_name: str, example_value: str, original_desc
         field_name: Русское название поля
         example_value: Пример значения поля
         original_description: Исходное описание датасета от пользователя
+        field_type: Тип поля
     
     Returns:
         Обогащенное описание поля
@@ -141,8 +309,15 @@ def enhance_field_description(field_name: str, example_value: str, original_desc
                 additional_info = info
                 break
     
-    # Формируем итоговое описание
+    # Формируем итоговое описание с учетом типа
     base_description = f"{field_name.capitalize()}"
+    
+    if field_type == 'integer':
+        base_description += " (целое число)"
+    elif field_type == 'number':
+        base_description += " (число)"
+    elif field_type == 'boolean':
+        base_description += " (логическое значение)"
     
     if additional_info and additional_info not in example_value:
         # Добавляем дополнительную информацию, если она не дублируется в примере
@@ -196,7 +371,7 @@ def structure_prompt_v2(
     tokenizer,
     model,
     description: str,
-    max_length: int = 1024
+    max_length: int = 4_096
 ) -> dict:
     """
     Создает структуру JSON на основе описания датасета.
@@ -225,7 +400,7 @@ def structure_prompt_v2(
 
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=200,
+            max_new_tokens=1024,
             temperature=0.1,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
@@ -238,7 +413,7 @@ def structure_prompt_v2(
         generated_text = generated_text.replace(prompt, "")
     
     field_pairs_str = generated_text.split("Результат:")[-1].strip()
-
+    
     if not field_pairs_str or ':' not in field_pairs_str:
         return None
 
@@ -251,15 +426,27 @@ def structure_prompt_v2(
         field_pairs_str = re.sub(r'[\n\r]+', ' ', field_pairs_str)
         field_pairs_str = re.sub(r'\s+', ' ', field_pairs_str)
         
+        # Попробуем несколько разных паттернов для извлечения полей
+        patterns_to_try = [
+            # Паттерн 1: учитывает запятые внутри примеров - ищет следующее русское поле как разделитель
+            r'([а-яА-ЯёЁ\s-]+?)\s*:\s*([a-zA-Z_]+)\s*:\s*(.*?)(?=\s*,\s*[а-яА-ЯёЁ\s-]+?\s*:\s*[a-zA-Z_]+\s*:|$)',
+            # Паттерн 2: альтернативный способ с более жадным захватом
+            r'([а-яА-ЯёЁ\s-]+?)\s*:\s*([a-zA-Z_]+)\s*:\s*(.*?)(?=,(?=[а-яА-ЯёЁ\s-]+?:)|$)',
+            # Паттерн 3: простой split по основным разделителям
+            r'([а-яА-ЯёЁ\s-]+?)\s*:\s*([a-zA-Z_]+)\s*:\s*([^,]*?)(?=\s*,\s*[а-яА-ЯёЁ\s-]+?\s*:|$)',
+            # Паттерн 4: базовый паттерн
+            r'([а-яА-ЯёЁ\s-]+)\s*:\s*([a-zA-Z_]+)\s*:\s*([^,]*)',
+        ]
         
-        # Улучшенный паттерн для захвата сложных примеров
-        pattern = re.compile(r'([а-яА-ЯёЁ -]+):([a-zA-Z_]+):([^,]*?)(?=,[а-яА-ЯёЁ -]+:|$)')
-        matches = pattern.findall(field_pairs_str)
-        
-        # Если первый паттерн не сработал, пробуем более простой
-        if not matches:
-            pattern = re.compile(r'([а-яА-ЯёЁ -]+):([a-zA-Z_]+):([^,]*?)(?=,|$)')
-            matches = pattern.findall(field_pairs_str)
+        matches = []
+        for i, pattern in enumerate(patterns_to_try):
+            try:
+                current_matches = re.findall(pattern, field_pairs_str, re.IGNORECASE)
+                if current_matches:
+                    matches = current_matches
+                    break
+            except Exception:
+                continue
 
         for rus_name, eng_key, example in matches:
             rus_name = rus_name.strip()
@@ -278,11 +465,14 @@ def structure_prompt_v2(
             else:
                 example_value = f'Example for {eng_key}'
             
+            # Определяем тип поля на основе контекста
+            field_type = detect_field_type(rus_name, example_value, description)
+            
             # Обогащаем описание на основе контекста из исходного запроса
-            enhanced_description = enhance_field_description(rus_name, example_value, description)
+            enhanced_description = enhance_field_description(rus_name, example_value, description, field_type)
 
             fields[eng_key] = {
-                'type': 'string',
+                'type': field_type,
                 'description': enhanced_description,
                 'example': example_value
             }
@@ -302,12 +492,64 @@ def structure_prompt_v2(
         return None
 
 
+def validate_and_fix_json_structure(generated_json: dict, required_structure: dict) -> dict:
+    """
+    СТРОГО валидирует и исправляет структуру JSON, обеспечивая 100% соответствие требуемой схеме.
+    
+    Args:
+        generated_json: Сгенерированный JSON
+        required_structure: Требуемая структура с полями
+    
+    Returns:
+        Исправленный JSON с правильной структурой
+    """
+    if not isinstance(generated_json, dict):
+        return None
+    
+    required_fields = set(required_structure['fields'].keys())
+    generated_fields = set(generated_json.keys())
+    
+    # КРИТИЧЕСКАЯ ПРОВЕРКА: есть ли лишние поля?
+    extra_fields = generated_fields - required_fields
+    if extra_fields:
+        for field in extra_fields:
+            del generated_json[field]
+    
+    # КРИТИЧЕСКАЯ ПРОВЕРКА: есть ли отсутствующие поля?
+    missing_fields = required_fields - generated_fields
+    if missing_fields:
+        for field in missing_fields:
+            field_type = required_structure['fields'][field]['type']
+            if field_type == 'string':
+                generated_json[field] = f"Автогенерированное значение для {field}"
+            elif field_type == 'integer':
+                import random
+                generated_json[field] = random.randint(1, 1000)
+            elif field_type == 'number':
+                import random
+                generated_json[field] = round(random.uniform(1.0, 100.0), 2)
+            elif field_type == 'boolean':
+                import random
+                generated_json[field] = random.choice([True, False])
+            else:
+                generated_json[field] = "значение"
+    
+    # КРИТИЧЕСКАЯ ПРОВЕРКА: правильный ли порядок полей?
+    # Пересоздаем JSON в правильном порядке
+    correct_ordered_json = {}
+    for required_field in required_structure['fields'].keys():
+        if required_field in generated_json:
+            correct_ordered_json[required_field] = generated_json[required_field]
+    
+    return correct_ordered_json
+
+
 def generate_chunk(
     tokenizer,
     model,
     structure,
     description: str = "",
-    max_new_tokens: int = 200
+    max_new_tokens: int = 1024
 ) -> dict:
     """
     Генерирует одну запись данных (чанк) на основе предоставленной структуры.
@@ -325,6 +567,10 @@ def generate_chunk(
     if not isinstance(structure, dict) or 'fields' not in structure:
         return {"error": "Неверный формат структуры"}
     
+    # ПОЛУЧАЕМ СТРОГИЙ СПИСОК ОБЯЗАТЕЛЬНЫХ КЛЮЧЕЙ
+    required_keys = list(structure['fields'].keys())
+    required_keys_str = ', '.join([f'"{key}"' for key in required_keys])
+    
     # Создаем описания полей для промпта
     field_descriptions = []
     for field_name, field_info in structure['fields'].items():
@@ -339,12 +585,15 @@ def generate_chunk(
         generation_prompt = CONTEXTUAL_DATA_GENERATION_PROMPT.format(
             description=description,
             field_descriptions=chr(10).join(field_descriptions),
-            example_record=example_record_str
+            example_record=example_record_str,
+            required_keys=required_keys_str
         )
     else:
         generation_prompt = DATA_GENERATION_PROMPT.format(
+            description=description,
             field_descriptions=chr(10).join(field_descriptions),
-            example_record=example_record_str
+            example_record=example_record_str,
+            required_keys=required_keys_str
         )
 
     with torch.inference_mode():
@@ -352,7 +601,7 @@ def generate_chunk(
             generation_prompt,
             return_tensors='pt',
             truncation=True,
-            max_length=512
+            max_length=2048
         ).to(model.device)
         
         output_ids = model.generate(
@@ -382,8 +631,10 @@ def generate_chunk(
                 field_type = structure['fields'][field]['type']
                 if field_type == 'string':
                     result[field] = f"Сгенерированное значение для {field}"
-                elif field_type == 'number':
+                elif field_type == 'integer':
                     result[field] = 0
+                elif field_type == 'number':
+                    result[field] = 0.0
                 elif field_type == 'boolean':
                     result[field] = True
                 elif field_type == 'array':
@@ -391,11 +642,17 @@ def generate_chunk(
                 else:
                     result[field] = "значение"
         
-        print(f"Успешно создана запись с полями: {list(result.keys())}")
+        # КРИТИЧЕСКИ ВАЖНО: применяем строгую валидацию структуры JSON
+        result = validate_and_fix_json_structure(result, structure)
+        if not result:
+            return None
+        
+        # Конвертируем типы данных для существующих полей
+        result = convert_field_types(result, structure['fields'])
+        
         return result
     
     # Если не удалось распарсить, возвращаем None для повторной попытки
-    print("Не удалось распарсить сгенерированные данные, будет произведена повторная попытка...")
     return None
 
 
