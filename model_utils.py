@@ -105,6 +105,55 @@ def safe_json_parse(text: str) -> dict:
     return None
 
 
+def enhance_field_description(field_name: str, example_value: str, original_description: str) -> str:
+    """
+    Обогащает описание поля на основе контекста из исходного описания датасета.
+    
+    Args:
+        field_name: Русское название поля
+        example_value: Пример значения поля
+        original_description: Исходное описание датасета от пользователя
+    
+    Returns:
+        Обогащенное описание поля
+    """
+    # Ищем дополнительный контекст в исходном описании
+    description_lower = original_description.lower()
+    field_lower = field_name.lower()
+    
+    # Паттерны для поиска дополнительной информации о полях
+    patterns = [
+        # Ищем объяснения в скобках типа "товар - 0, услуга - 1"
+        rf'{re.escape(field_lower)}[^\(]*\(([^\)]*-[^\)]*)\)',
+        # Ищем объяснения после поля
+        rf'{re.escape(field_lower)}[^,]*\(([^\)]+)\)',
+        # Общий поиск дополнительной информации
+        rf'{re.escape(field_lower)}[^,]*([^,]*)',
+    ]
+    
+    additional_info = ""
+    for pattern in patterns:
+        match = re.search(pattern, description_lower)
+        if match:
+            info = match.group(1).strip()
+            # Проверяем, содержит ли найденная информация полезные детали
+            if any(char in info for char in ['-', ':', 'или', 'и']):
+                additional_info = info
+                break
+    
+    # Формируем итоговое описание
+    base_description = f"{field_name.capitalize()}"
+    
+    if additional_info and additional_info not in example_value:
+        # Добавляем дополнительную информацию, если она не дублируется в примере
+        base_description += f" ({additional_info})"
+    
+    if example_value and not example_value.startswith('Example for'):
+        base_description += f". Пример: {example_value}"
+    
+    return base_description
+
+
 def load_model(
     model_id: str,
     device: str = 'auto',
@@ -202,10 +251,15 @@ def structure_prompt_v2(
         field_pairs_str = re.sub(r'[\n\r]+', ' ', field_pairs_str)
         field_pairs_str = re.sub(r'\s+', ' ', field_pairs_str)
         
-        # Use regex to robustly find all "russian_name:english_key:example" triplets
-        # Останавливаемся на запятой или конце строки
-        pattern = re.compile(r'([а-яА-ЯёЁ -]+):([a-zA-Z_]+):([^,]*?)(?=,|$)')
+        
+        # Улучшенный паттерн для захвата сложных примеров
+        pattern = re.compile(r'([а-яА-ЯёЁ -]+):([a-zA-Z_]+):([^,]*?)(?=,[а-яА-ЯёЁ -]+:|$)')
         matches = pattern.findall(field_pairs_str)
+        
+        # Если первый паттерн не сработал, пробуем более простой
+        if not matches:
+            pattern = re.compile(r'([а-яА-ЯёЁ -]+):([a-zA-Z_]+):([^,]*?)(?=,|$)')
+            matches = pattern.findall(field_pairs_str)
 
         for rus_name, eng_key, example in matches:
             rus_name = rus_name.strip()
@@ -223,10 +277,13 @@ def structure_prompt_v2(
                 example_value = example
             else:
                 example_value = f'Example for {eng_key}'
+            
+            # Обогащаем описание на основе контекста из исходного запроса
+            enhanced_description = enhance_field_description(rus_name, example_value, description)
 
             fields[eng_key] = {
                 'type': 'string',
-                'description': f'{rus_name.capitalize()}. Пример: {example_value}' if example else rus_name.capitalize(),
+                'description': enhanced_description,
                 'example': example_value
             }
             example_record[eng_key] = example_value

@@ -18,7 +18,7 @@ TOKEN_KEY = "HF_TOKEN"
 
 MODEL_CHOICES = [
     ("Qwen3-4B", "Qwen/Qwen3-4B"),
-    ("Qwen3-8B-FP8", "Qwen/Qwen3-8B-FP8")
+    ("Qwen3-8B", "Qwen/Qwen3-8B")
 ]
 
 def load_env():
@@ -112,7 +112,7 @@ def main():
         os.environ['HUGGINGFACE_TOKEN'] = token
 
     # Описание датасета
-    print("\\nВведите описание датасета (нажмите Enter дважды для завершения):")
+    print("\nВведите описание датасета (нажмите Enter дважды для завершения):")
     lines = []
     while True:
         line = input()
